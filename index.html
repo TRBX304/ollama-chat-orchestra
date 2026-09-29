@@ -1,0 +1,2462 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ollama Console</title>
+  <!-- テーマ初期化（描画前に適用してちらつきを防ぐ。既定はダーク） -->
+  <script>
+    try {
+      if (localStorage.getItem('ollama_theme') !== 'light') document.documentElement.classList.add('dark');
+    } catch (_) { document.documentElement.classList.add('dark'); }
+    try {
+      if (localStorage.getItem('ollama_statusbar') === 'hidden') document.documentElement.classList.add('statusbar-hidden');
+    } catch (_) {}
+  </script>
+  <!-- フォント: IBM Plex Mono はプログラミング用リガチャを持たないので != が ≠ に化けない -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <!-- marked.js: フル Markdown レンダリング -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- KaTeX: LaTeX数式レンダリング -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <style>
+    /* ═════════════════════════════════════════════
+       テーマ変数
+       ライト: 白地に紺インク / ダーク: 夜間の管制画面
+       シアン = 状態・AI、青 = ユーザー、黄 = 主操作のホバーだけ
+       ═════════════════════════════════════════════ */
+    :root {
+      --bg: #F3F6FA;
+      --panel: #FFFFFF;
+      --panel-2: #E9EFF7;
+      --line: #C3D1E3;
+      --line-strong: #0A2E5C;
+      --ink: #14365F;
+      --ink-strong: #061E3D;
+      --ink-sub: #56657C;
+      --accent: #007C99;          /* 文字用シアン（白地でも読めるよう濃く） */
+      --accent-line: #00A5C4;     /* 線・塗り用シアン */
+      --accent-bg: rgba(0, 165, 196, .10);
+      --user: #2F6FD1;
+      --user-bg: #E6EEFA;
+      --hi: #FFEA00;
+      --on-accent: #03101F;
+      --warn: #9A6700;
+      --danger: #C8264A;
+      --danger-bg: rgba(200, 38, 74, .08);
+      --code-bg: #0B1A33;
+      --code-ink: #DCEBFF;
+      --code-line: #1F3B63;
+      --inline-code-bg: rgba(10, 46, 92, .08);
+      --grid: rgba(10, 46, 92, .035);
+      --shadow: 0 12px 32px rgba(10, 46, 92, .16);
+
+      --font-sans: 'IBM Plex Sans JP', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', Meiryo, system-ui, sans-serif;
+      --font-mono: 'IBM Plex Mono', 'Cascadia Mono', Consolas, 'BIZ UDGothic', monospace;
+      color-scheme: light;
+    }
+
+    html.dark {
+      --bg: #060D1A;
+      --panel: #0B1830;
+      --panel-2: #0F2142;
+      --line: #1F3B63;
+      --line-strong: #2E5A8F;
+      --ink: #C9DDF5;
+      --ink-strong: #EDF5FF;
+      --ink-sub: #8196B7;
+      --accent: #00DFFF;
+      --accent-line: #00DFFF;
+      --accent-bg: rgba(0, 223, 255, .08);
+      --user: #6AAEFF;
+      --user-bg: #0E2346;
+      --warn: #FFEA00;
+      --danger: #FF5C7A;
+      --danger-bg: rgba(255, 92, 122, .10);
+      --code-bg: #040A15;
+      --code-line: #1A3257;
+      --inline-code-bg: rgba(0, 223, 255, .10);
+      --grid: rgba(0, 223, 255, .03);
+      --shadow: 0 16px 40px rgba(0, 0, 0, .55);
+      color-scheme: dark;
+    }
+
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body { height: 100%; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--ink);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button { font-family: inherit; }
+    :focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+
+    /* ── 角を落としたパネル（線が斜辺にも途切れず入る2層構造） ──
+       外側: 線の色で塗って切り抜く / 内側(::before): 1px内側をパネル色で塗って同じ形に切り抜く
+       斜辺の線幅を1pxにするため、内側の切り欠きは √2-1 ≒ 0.6px 小さくする */
+    .chamfer {
+      --cut: 10px;
+      --edge: var(--line);
+      --fill: var(--panel);
+      position: relative;
+      background: var(--edge);
+      clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+    }
+    .chamfer::before {
+      content: '';
+      position: absolute;
+      inset: 1px;
+      background: var(--fill);
+      clip-path: polygon(calc(var(--cut) - .6px) 0, 100% 0, 100% calc(100% - var(--cut) + .6px), calc(100% - var(--cut) + .6px) 100%, 0 100%, 0 calc(var(--cut) - .6px));
+      pointer-events: none;
+    }
+    .chamfer > * { position: relative; z-index: 1; }
+
+    /* ═════════ ヘッダー ═════════ */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 24px;
+      border-bottom: 2px solid var(--accent-line);
+      position: relative;
+      flex-shrink: 0;
+    }
+    /* 生成中だけ、区切り線の上を光が流れる（本当に処理中のときだけ動く） */
+    header::after {
+      content: '';
+      position: absolute;
+      left: 0; bottom: -2px;
+      width: 24%; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--ink-strong), transparent);
+      opacity: 0;
+      pointer-events: none;
+    }
+    html.generating header::after {
+      opacity: 1;
+      animation: sweep 1.4s linear infinite;
+    }
+    @keyframes sweep {
+      from { transform: translateX(-100%); }
+      to   { transform: translateX(420%); }
+    }
+
+    .brand { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .brand-name {
+      font-family: var(--font-mono);
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--ink-strong);
+      letter-spacing: .01em;
+    }
+    .brand-name span { color: var(--accent); }
+    .brand-host {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--ink-sub);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    .header-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+    #model-select {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      background: var(--panel);
+      color: var(--ink-strong);
+      border: 1px solid var(--line);
+      padding: 7px 10px;
+      max-width: 240px;
+      cursor: pointer;
+      outline: none;
+      border-radius: 0;
+    }
+    #model-select:hover { border-color: var(--line-strong); }
+    #model-select:focus-visible { border-color: var(--accent-line); outline: none; }
+    #model-select option { background: var(--panel); color: var(--ink); }
+
+    .icon-btn, #reset-btn {
+      height: 34px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink-sub);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: color .15s, border-color .15s;
+    }
+    .icon-btn { width: 34px; }
+    .icon-btn svg { width: 17px; height: 17px; }
+    .icon-btn:hover, #reset-btn:hover { color: var(--ink-strong); border-color: var(--line-strong); }
+    #reset-btn { padding: 0 12px; font-size: 12.5px; display: none; }
+
+    /* テーマボタン: 今のテーマと逆のアイコンを出す */
+    #theme-btn .icon-sun { display: none; }
+    html.dark #theme-btn .icon-sun { display: block; }
+    html.dark #theme-btn .icon-moon { display: none; }
+
+    /* ═════════ ステータスバー ═════════ */
+    #statusbar {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) minmax(190px, 1.4fr) minmax(130px, 1fr) minmax(170px, 1.3fr) minmax(90px, .6fr);
+      gap: 8px;
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .stat {
+      --cut: 8px;
+      padding: 8px 12px 9px 15px;
+      min-width: 0;
+    }
+    /* 左端の色帯（内側パネルに inset shadow で描く＝切り欠きに沿って自然に切れる） */
+    .stat::before { box-shadow: inset 3px 0 0 var(--band, var(--line-strong)); }
+    .stat-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: .14em;
+      color: var(--ink-sub);
+    }
+    .stat-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+    .stat-value {
+      font-family: var(--font-mono);
+      font-size: 19px;
+      font-weight: 600;
+      color: var(--ink-strong);
+      line-height: 1.35;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .stat-value small { font-size: 11px; font-weight: 500; color: var(--ink-sub); margin-left: 3px; }
+    .stat-sub {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ink-sub);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* 折りたたみ（高さを詰めて消す。線やパネルの形はそのまま） */
+    #statusbar {
+      max-height: 160px;
+      overflow: hidden;
+      transition: max-height .22s ease, padding .22s ease, border-color .22s ease, opacity .18s ease;
+    }
+    html.statusbar-hidden #statusbar {
+      max-height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+      border-bottom-color: transparent;
+      opacity: 0;
+      visibility: hidden;
+    }
+
+    /* 折りたたみ中だけヘッダーに出る小さな状態表示 */
+    .mini-stat {
+      display: none;
+      align-items: center;
+      gap: 7px;
+      height: 34px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--ink-sub);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    html.statusbar-hidden .mini-stat { display: flex; margin-left: auto; }
+    html.statusbar-hidden .header-right { margin-left: 0; }
+    .mini-stat .status-dot { width: 7px; height: 7px; }
+    #mini-tps { color: var(--ink-strong); font-weight: 600; }
+    .mini-stat.live #mini-tps { color: var(--accent); }
+
+    /* 表示中はボタンをシアンに（押されている状態） */
+    #statusbar-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-line); }
+
+    /* 状態セル */
+    #stat-status { --band: var(--ink-sub); }
+    #stat-status.ready { --band: var(--accent-line); }
+    #stat-status.checking { --band: var(--warn); }
+    #stat-status.error { --band: var(--danger); }
+    .status-line { display: flex; align-items: center; gap: 8px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-sub); flex-shrink: 0; }
+    .status-dot.ready { background: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-bg); }
+    .status-dot.checking { background: var(--warn); animation: blink 1s steps(2, start) infinite; }
+    .status-dot.error { background: var(--danger); }
+    #status-text { font-size: 15px; }
+
+    /* 生成速度セル（今回の主役） */
+    #stat-gen { --band: var(--accent-line); }
+    #stat-gen.live .stat-value { color: var(--accent); }
+    .spark { display: flex; align-items: flex-end; gap: 2px; height: 22px; padding-bottom: 3px; }
+    .spark i { display: block; width: 4px; min-height: 2px; background: var(--line-strong); opacity: .55; }
+    .spark i:last-child { background: var(--accent-line); opacity: 1; }
+
+    #stat-vram.offload { --band: var(--warn); }
+    #stat-vram.offload .stat-sub { color: var(--warn); }
+
+    /* ═════════ チャットログ ═════════ */
+    #chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 24px 36px;
+      display: flex;
+      flex-direction: column;
+      gap: 26px;
+      background-image:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+      background-size: 24px 24px;
+      background-attachment: local;
+    }
+    #chat-container::-webkit-scrollbar { width: 8px; }
+    #chat-container::-webkit-scrollbar-thumb { background: var(--line); }
+    #chat-container::-webkit-scrollbar-track { background: transparent; }
+
+    .message {
+      width: 100%;
+      max-width: 860px;
+      margin: 0 auto;
+      animation: rise .2s ease-out;
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    .msg-head {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 7px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--ink-sub);
+      min-height: 22px;
+    }
+    .msg-head .role { font-weight: 600; letter-spacing: .06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
+    .message.ai .role { color: var(--accent); }
+    .message.user .role { color: var(--user); }
+    .message.draft .role { color: var(--ink-sub); }
+    .msg-head .meta { display: flex; gap: 12px; white-space: nowrap; overflow: hidden; min-width: 0; font-variant-numeric: tabular-nums; }
+    .msg-head .meta .fast { color: var(--accent); }
+
+    .copy-btn {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink-sub);
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .15s, color .15s, border-color .15s;
+    }
+    .message:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+    .copy-btn:hover { color: var(--ink-strong); border-color: var(--line-strong); }
+    .copy-btn.copied { color: var(--accent); border-color: var(--accent-line); opacity: 1; }
+    @media (hover: none) { .copy-btn { opacity: 1; } }
+
+    .bubble {
+      font-size: 15px;
+      line-height: 1.85;
+      color: var(--ink);
+      word-break: break-word;
+      padding: 2px 0 2px 18px;
+      border-left: 2px solid var(--accent-line);
+    }
+    .message.user .bubble {
+      background: var(--user-bg);
+      border-left-color: var(--user);
+      padding: 10px 16px;
+      color: var(--ink-strong);
+    }
+
+    /* ── Markdown ── */
+    .bubble > div > *:first-child { margin-top: 0; }
+    .bubble > div > *:last-child { margin-bottom: 0; }
+    .bubble p { margin: 0 0 .8em; }
+    .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
+      color: var(--ink-strong);
+      line-height: 1.4;
+      margin: 1.3em 0 .5em;
+      font-weight: 700;
+    }
+    .bubble h1 { font-size: 1.35em; }
+    .bubble h2 { font-size: 1.2em; padding-bottom: .25em; border-bottom: 1px solid var(--line); }
+    .bubble h3 { font-size: 1.07em; }
+    .bubble h4, .bubble h5, .bubble h6 { font-size: 1em; }
+    .bubble ul, .bubble ol { margin: 0 0 .8em; padding-left: 1.5em; }
+    .bubble li { margin: .15em 0; }
+    .bubble li::marker { color: var(--accent); }
+    .bubble strong { color: var(--ink-strong); font-weight: 700; }
+    .bubble a { color: var(--accent); text-underline-offset: 3px; }
+    .bubble hr { border: none; border-top: 1px solid var(--line); margin: 1.2em 0; }
+    .bubble blockquote {
+      margin: 0 0 .8em;
+      padding: 4px 14px;
+      border-left: 3px solid var(--line-strong);
+      color: var(--ink-sub);
+    }
+    .bubble table { border-collapse: collapse; margin: 0 0 .9em; font-size: 14px; display: block; overflow-x: auto; max-width: 100%; }
+    .bubble th, .bubble td { border: 1px solid var(--line); padding: 6px 12px; text-align: left; }
+    .bubble th { background: var(--panel-2); color: var(--ink-strong); font-weight: 700; }
+    .bubble img { max-width: 100%; }
+
+    .bubble code {
+      font-family: var(--font-mono);
+      font-variant-ligatures: none;
+      font-feature-settings: "liga" 0, "calt" 0;
+    }
+    .bubble :not(pre) > code {
+      background: var(--inline-code-bg);
+      padding: 1px 6px;
+      font-size: .88em;
+      color: var(--ink-strong);
+    }
+    .bubble pre {
+      background: var(--code-bg);
+      color: var(--code-ink);
+      border: 1px solid var(--code-line);
+      padding: 14px 16px;
+      margin: 0 0 .9em;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .bubble pre code { color: inherit; background: none; padding: 0; }
+
+    /* コードブロックの見出し（言語名 + コピー）。応答完了後に付く */
+    .code-wrap { margin: 0 0 .9em; }
+    .code-wrap pre { margin: 0; border-top: none; }
+    .code-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--code-bg);
+      border: 1px solid var(--code-line);
+      border-bottom: 1px dashed var(--code-line);
+      padding: 4px 8px 4px 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: #7E93B5;
+      letter-spacing: .06em;
+    }
+    .code-bar button {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: transparent;
+      border: 1px solid #1F3B63;
+      color: #9FB3D1;
+      padding: 1px 8px;
+      cursor: pointer;
+    }
+    .code-bar button:hover { color: #EDF5FF; border-color: #2E5A8F; }
+    .code-bar button.copied { color: #00DFFF; border-color: #00DFFF; }
+
+    .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+
+    /* 添付画像 */
+    .bubble .msg-images { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .bubble .msg-images img {
+      max-width: 200px; max-height: 200px;
+      border: 1px solid var(--line);
+      object-fit: cover; cursor: pointer;
+    }
+
+    /* ── 思考過程 ── */
+    .thinking-box { margin-bottom: 12px; }
+    .thinking-header {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      letter-spacing: .06em;
+      color: var(--ink-sub);
+      cursor: pointer;
+      user-select: none;
+      padding: 2px 0;
+      background: none; border: none;
+    }
+    .thinking-header:hover { color: var(--ink-strong); }
+    .thinking-header .arrow { display: inline-block; transition: transform .15s; font-size: 9px; }
+    .thinking-box.collapsed .thinking-header .arrow { transform: rotate(-90deg); }
+    .thinking-content {
+      margin-top: 6px;
+      font-size: 13px;
+      line-height: 1.75;
+      color: var(--ink-sub);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 320px;
+      overflow-y: auto;
+      border-left: 2px dashed var(--line-strong);
+      padding-left: 12px;
+    }
+    .thinking-box.collapsed .thinking-content { display: none; }
+
+    /* ── 下書きAI ── */
+    .message.draft .bubble { border-left: 2px dotted var(--line-strong); }
+    .draft-content { font-size: 13.5px; line-height: 1.75; color: var(--ink-sub); }
+    .draft-content .draft-label { display: none; }
+    .draft-content .draft-body { white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; }
+
+    /* ── 応答待ち ── */
+    .typing-indicator {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--ink-sub);
+      padding-left: 18px;
+      border-left: 2px solid var(--accent-line);
+    }
+    .typing-indicator::after {
+      content: '';
+      display: inline-block;
+      width: 8px; height: 15px;
+      margin-left: 6px;
+      vertical-align: -2px;
+      background: var(--accent-line);
+      animation: blink 1s steps(2, start) infinite;
+    }
+    @keyframes blink { to { visibility: hidden; } }
+
+    /* ── 接続中・エラーカード ── */
+    .info-card {
+      --cut: 14px;
+      max-width: 560px;
+      width: 100%;
+      margin: auto;
+      padding: 22px 26px 24px 28px;
+    }
+    .info-card::before { box-shadow: inset 4px 0 0 var(--accent-line); }
+    .info-card.error::before { box-shadow: inset 4px 0 0 var(--danger); }
+    .info-card .emoji { display: none; }
+    .info-card .card-tag {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+    .info-card.error .card-tag { color: var(--danger); }
+    .info-card h2 { font-size: 18px; color: var(--ink-strong); margin-bottom: 8px; }
+    .info-card p { font-size: 14px; color: var(--ink-sub); line-height: 1.75; }
+    .info-card ul { margin: 10px 0 0 1.2em; font-size: 13.5px; color: var(--ink-sub); line-height: 2; }
+    .info-card code { font-family: var(--font-mono); font-size: .9em; color: var(--ink-strong); background: var(--inline-code-bg); padding: 1px 6px; }
+
+    .btn-primary {
+      --cut: 7px;
+      margin-top: 18px;
+      padding: 9px 20px;
+      font-size: 14px;
+      font-weight: 700;
+      background: var(--accent-line);
+      color: var(--on-accent);
+      border: none;
+      cursor: pointer;
+      clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+    }
+    .btn-primary:hover { background: var(--hi); }
+
+    /* ═════════ 入力エリア ═════════ */
+    #input-area {
+      padding: 12px 24px 12px;
+      border-top: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .input-inner { max-width: 860px; margin: 0 auto; }
+
+    #preview-strip { display: none; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .preview-item {
+      position: relative;
+      width: 68px; height: 68px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    .preview-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .preview-item.file-chip {
+      width: auto; height: 34px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 4px 0 0;
+    }
+    .preview-item.file-chip .file-icon {
+      align-self: stretch;
+      display: flex; align-items: center;
+      padding: 0 8px;
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      background: var(--panel-2);
+      color: var(--accent);
+      border-right: 1px solid var(--line);
+    }
+    .preview-item.file-chip .file-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--ink);
+      max-width: 160px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .preview-item .remove-btn {
+      position: absolute; top: 2px; right: 2px;
+      width: 20px; height: 20px;
+      border: none;
+      background: rgba(3, 16, 31, .75);
+      color: #fff;
+      font-size: 13px; line-height: 1;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .preview-item.file-chip .remove-btn { position: static; background: transparent; color: var(--ink-sub); }
+    .preview-item.file-chip .remove-btn:hover { color: var(--danger); }
+
+    .input-wrapper {
+      --cut: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      padding: 10px 10px 10px 12px;
+      transition: background .15s;
+    }
+    .input-wrapper:focus-within { --edge: var(--accent-line); }
+
+    #attach-btn {
+      width: 36px; height: 36px;
+      border: none;
+      background: transparent;
+      color: var(--ink-sub);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    #attach-btn:hover { color: var(--accent); }
+    #attach-btn svg { width: 18px; height: 18px; }
+
+    #user-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--ink-strong);
+      font-family: var(--font-sans);
+      font-size: 15px;
+      line-height: 1.6;
+      resize: none;
+      max-height: 180px;
+      padding: 6px 0;
+    }
+    #user-input::placeholder { color: var(--ink-sub); opacity: .8; }
+
+    #send-btn, #stop-btn {
+      --cut: 7px;
+      width: 40px; height: 36px;
+      border: none;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+      transition: background .15s;
+    }
+    #send-btn svg, #stop-btn svg { width: 17px; height: 17px; }
+    #send-btn { background: var(--accent-line); color: var(--on-accent); }
+    #send-btn:hover:not(:disabled) { background: var(--hi); }
+    #send-btn:disabled { opacity: .35; cursor: not-allowed; }
+    #stop-btn { display: none; background: var(--danger); color: #fff; }
+    #stop-btn:hover { filter: brightness(1.1); }
+    #send-btn:focus-visible, #stop-btn:focus-visible, #attach-btn:focus-visible { outline-offset: -3px; }
+
+    .hint {
+      display: flex; justify-content: space-between; gap: 16px;
+      margin-top: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ink-sub);
+    }
+    .hint kbd {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      border: 1px solid var(--line);
+      padding: 0 4px;
+      background: var(--panel);
+    }
+
+    /* ドラッグ中 */
+    body.drag-over::after {
+      content: 'ここにドロップして添付';
+      position: fixed; inset: 12px;
+      background: var(--accent-bg);
+      border: 2px dashed var(--accent-line);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; font-weight: 700;
+      color: var(--accent);
+      pointer-events: none;
+      z-index: 1000;
+    }
+
+    /* ═════════ 設定パネル ═════════ */
+    #settings-overlay {
+      position: fixed; inset: 0;
+      background: rgba(3, 10, 22, .45);
+      z-index: 998;
+      opacity: 0; visibility: hidden;
+      transition: opacity .2s, visibility .2s;
+    }
+    #settings-overlay.open { opacity: 1; visibility: visible; }
+
+    #settings-panel {
+      position: fixed;
+      top: 64px; right: 24px;
+      width: 340px;
+      max-width: calc(100vw - 32px);
+      max-height: calc(100vh - 88px);
+      background: var(--panel);
+      border: 1px solid var(--line-strong);
+      border-top: 2px solid var(--accent-line);
+      box-shadow: var(--shadow);
+      z-index: 999;
+      display: flex; flex-direction: column;
+      opacity: 0; visibility: hidden;
+      transform: translateY(-6px);
+      transition: opacity .18s, transform .18s, visibility .18s;
+    }
+    #settings-panel.open { opacity: 1; visibility: visible; transform: none; }
+
+    .settings-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .settings-header h3 { font-size: 15px; font-weight: 700; color: var(--ink-strong); }
+    #settings-close {
+      width: 30px; height: 30px;
+      border: none; background: transparent;
+      color: var(--ink-sub);
+      font-size: 22px; line-height: 1;
+      cursor: pointer;
+    }
+    #settings-close:hover { color: var(--ink-strong); }
+
+    .settings-body { padding: 18px; overflow-y: auto; flex: 1; }
+    .settings-label { display: block; font-size: 14px; font-weight: 700; color: var(--ink-strong); margin-bottom: 4px; }
+    .settings-desc { font-size: 12.5px; color: var(--ink-sub); line-height: 1.65; margin-bottom: 12px; }
+    .settings-divider { height: 1px; background: var(--line); margin: 18px 0; }
+
+    .ctx-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    .ctx-btn {
+      padding: 9px 0;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink-sub);
+      cursor: pointer;
+    }
+    .ctx-btn:hover { color: var(--ink-strong); border-color: var(--line-strong); }
+    .ctx-btn.active { border-color: var(--accent-line); color: var(--accent); background: var(--accent-bg); }
+
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .toggle-row .toggle-label { font-size: 14px; font-weight: 700; color: var(--ink-strong); }
+    .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
+    .toggle-switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 2; }
+    .toggle-slider {
+      position: absolute; inset: 0;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      transition: background .15s, border-color .15s;
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 16px; height: 16px;
+      left: 3px; top: 3px;
+      background: var(--ink-sub);
+      transition: transform .15s, background .15s;
+    }
+    .toggle-switch input:checked + .toggle-slider { background: var(--accent-line); border-color: var(--accent-line); }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); background: var(--on-accent); }
+    .toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+
+    /* ═════════ スマホ ═════════ */
+    @media (max-width: 720px) {
+      header { padding: 10px 14px; gap: 10px; flex-wrap: wrap; }
+      .brand-host { display: none; }
+      .header-right { width: 100%; }
+      .mini-stat { height: 28px; font-size: 11.5px; }
+      #model-select { flex: 1; min-width: 0; max-width: none; }
+
+      #statusbar {
+        grid-template-columns: repeat(5, minmax(128px, 1fr));
+        overflow-x: auto;
+        padding: 10px 14px;
+        scrollbar-width: none;
+      }
+      #statusbar::-webkit-scrollbar { display: none; }
+      .stat-value { font-size: 17px; }
+
+      #chat-container { padding: 18px 14px 28px; gap: 22px; }
+      .bubble { font-size: 14.5px; padding-left: 13px; }
+      .msg-head, .msg-head .meta { gap: 8px; font-size: 11px; }
+      .message.user .bubble { padding: 9px 13px; }
+      .bubble pre { font-size: 12px; padding: 12px; }
+
+      #input-area { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+      .hint .hint-keys { display: none; }
+
+      #settings-panel {
+        top: auto; bottom: 0; left: 0; right: 0;
+        width: 100%; max-width: 100%;
+        max-height: 85vh;
+        transform: translateY(100%);
+      }
+      #settings-panel.open { transform: none; }
+      .settings-body { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+      .ctx-btn { padding: 12px 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-name">ollama<span>/console</span></div>
+    <div class="brand-host" id="host-label">localhost</div>
+  </div>
+  <div class="mini-stat" id="mini-stat" title="生成速度（直近）">
+    <span class="status-dot checking" id="mini-dot"></span>
+    <span id="mini-tps">--</span><span>tok/s</span>
+  </div>
+  <div class="header-right">
+    <select id="model-select" title="使用するモデルを選択" aria-label="使用するモデル">
+      <option value="">モデル読込中…</option>
+    </select>
+    <button id="statusbar-btn" class="icon-btn" title="ステータスを隠す" aria-label="ステータス表示の切替" aria-pressed="true" aria-controls="statusbar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16"/><path d="M3 10h18M9 4v6M15 4v6"/></svg>
+    </button>
+    <button id="theme-btn" class="icon-btn" title="テーマ切替" aria-label="テーマ切替">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <button id="settings-btn" class="icon-btn" title="設定" aria-label="設定">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+    </button>
+    <button id="reset-btn" title="会話をリセット">リセット</button>
+  </div>
+</header>
+
+<!-- サーバー状態 -->
+<section id="statusbar" aria-label="サーバー状態">
+  <div class="stat chamfer checking" id="stat-status">
+    <div class="stat-label">STATUS</div>
+    <div class="stat-value status-line"><span class="status-dot checking" id="status-dot"></span><span id="status-text">確認中</span></div>
+    <div class="stat-sub" id="status-sub">Ollama API</div>
+  </div>
+  <div class="stat chamfer" id="stat-gen">
+    <div class="stat-label">GEN TOK/S</div>
+    <div class="stat-row">
+      <div class="stat-value" id="gen-value">--</div>
+      <div class="spark" id="gen-spark" aria-hidden="true"></div>
+    </div>
+    <div class="stat-sub" id="gen-sub">まだ生成していません</div>
+  </div>
+  <div class="stat chamfer" id="stat-prompt">
+    <div class="stat-label">PROMPT TOK/S</div>
+    <div class="stat-value" id="prompt-value">--</div>
+    <div class="stat-sub" id="prompt-sub">入力の読み込み速度</div>
+  </div>
+  <div class="stat chamfer" id="stat-vram">
+    <div class="stat-label">VRAM</div>
+    <div class="stat-value" id="vram-value">--</div>
+    <div class="stat-sub" id="vram-sub">取得中</div>
+  </div>
+  <div class="stat chamfer" id="stat-ctx">
+    <div class="stat-label">CTX</div>
+    <div class="stat-value" id="ctx-value">--</div>
+    <div class="stat-sub">num_ctx</div>
+  </div>
+</section>
+
+<!-- 設定パネル（PC: ドロップダウン / スマホ: ボトムシート） -->
+<div id="settings-overlay"></div>
+<div id="settings-panel" role="dialog" aria-label="設定">
+  <div class="settings-header">
+    <h3>設定</h3>
+    <button id="settings-close" title="閉じる" aria-label="閉じる">×</button>
+  </div>
+  <div class="settings-body">
+    <label class="settings-label">コンテキストウィンドウ</label>
+    <p class="settings-desc">大きいほど長い文脈を保持できますが、VRAM消費が増え速度が低下します。大きな値が使えるかはモデルとVRAMによります。</p>
+    <div class="ctx-options" id="ctx-options">
+      <button class="ctx-btn" data-ctx="2048">2K</button>
+      <button class="ctx-btn" data-ctx="4096">4K</button>
+      <button class="ctx-btn" data-ctx="8192">8K</button>
+      <button class="ctx-btn" data-ctx="16384">16K</button>
+      <button class="ctx-btn" data-ctx="32768">32K</button>
+      <button class="ctx-btn" data-ctx="65536">64K</button>
+      <button class="ctx-btn" data-ctx="131072">128K</button>
+    </div>
+
+    <div class="settings-divider"></div>
+
+    <div class="toggle-row">
+      <span class="toggle-label">思考モード（Thinking）</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="thinking-toggle" aria-label="思考モード">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <p class="settings-desc" style="margin-top:8px; margin-bottom:0;">対応モデル（DeepSeek-R1, Qwen3 など）で思考過程を表示します。非対応モデルでは自動で無効になります。</p>
+
+    <div class="settings-divider"></div>
+
+    <div class="toggle-row">
+      <span class="toggle-label">オーケストレーションモード</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="orchestration-toggle" aria-label="オーケストレーションモード">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <p class="settings-desc" style="margin-top:8px;">複数の「下書きAI」が順番に回答を生成し、その内容を「推敲AI」がまとめて最終回答を出力します。</p>
+
+    <label class="settings-label" style="margin-top:6px;">下書きAIの数</label>
+    <p class="settings-desc">下書きAIが回答を生成する回数（直列実行）。多いほど時間がかかります。</p>
+    <div class="ctx-options" id="draft-count-options">
+      <button class="ctx-btn" data-n="1">1</button>
+      <button class="ctx-btn" data-n="2">2</button>
+      <button class="ctx-btn" data-n="3">3</button>
+      <button class="ctx-btn" data-n="4">4</button>
+    </div>
+  </div>
+</div>
+
+<main id="chat-container">
+  <div id="init-card" class="info-card chamfer">
+    <div class="card-tag">CONNECTING</div>
+    <h2>Ollama に接続しています</h2>
+    <p>ローカルの Ollama サーバーを確認しています。しばらくお待ちください。</p>
+  </div>
+</main>
+
+<div id="input-area">
+  <div class="input-inner">
+    <div id="preview-strip"></div>
+
+    <div class="input-wrapper chamfer">
+      <button id="attach-btn" title="画像・テキスト・コードファイルを添付" aria-label="ファイルを添付">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+
+      <textarea
+        id="user-input"
+        rows="1"
+        placeholder="メッセージを入力"
+        aria-label="メッセージ"
+        disabled
+      ></textarea>
+
+      <button id="stop-btn" title="生成を停止" aria-label="生成を停止">
+        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"/></svg>
+      </button>
+
+      <button id="send-btn" disabled title="送信" aria-label="送信">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M13 6l6 6-6 6"/>
+        </svg>
+      </button>
+    </div>
+    <div class="hint">
+      <span>画像・テキスト・コードはドラッグ＆ドロップでも添付できます（画像はマルチモーダル対応モデルのみ）</span>
+      <span class="hint-keys"><kbd>Enter</kbd> 送信　<kbd>Shift</kbd>+<kbd>Enter</kbd> 改行</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+//  Config
+// ─────────────────────────────────────────────
+// 接続先の判定:
+//   - file:// で直接開いた場合 → Ollama に直接接続
+//   - localhost / 127.0.0.1 でポートあり（例: :3000）→ server.js プロキシ経由
+//   - それ以外（ngrok等の外部URL、ポートなしhttps等）→ server.js プロキシ経由
+const OLLAMA_BASE = (() => {
+  const { protocol, hostname, port } = window.location;
+  // file:// で開いた場合のみ直接接続
+  if (protocol === 'file:') return 'http://localhost:11434';
+  // localhost/127.0.0.1 でポートなし（通常ありえないが念のため直接接続）
+  if ((hostname === 'localhost' || hostname === '127.0.0.1') && port === '') {
+    return 'http://localhost:11434';
+  }
+  // それ以外はすべてプロキシ経由（ngrok含む）
+  return window.location.origin + '/ollama';
+})();
+
+// ─────────────────────────────────────────────
+//  marked.js 設定
+// ─────────────────────────────────────────────
+marked.setOptions({
+  breaks: true,       // 改行を<br>に変換
+  gfm: true,          // GitHub Flavored Markdown
+});
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ─────────────────────────────────────────────
+//  LaTeX + Markdown レンダリング
+// ─────────────────────────────────────────────
+
+// 数式をプレースホルダーに退避してからmarked.jsに渡す
+// → marked.jsが _ や * を誤解釈するのを防ぐ
+// $$...$$ を先に処理することで $...$ との誤マッチを防ぐ
+function extractMath(text) {
+  const blocks = [];
+  const codes = [];
+  // NUL文字(\x00)はHTMLに現れないのでプレースホルダーとして安全
+  const PLACEHOLDER = (i) => `\x00M${i}\x00`;
+  const CODE_PH = (i) => `\x00C${i}\x00`;
+
+  // ⓪ コードブロック(```...```)とインラインコード(`...`)を先に退避
+  //    → コード内の $ が数式として誤認識されるのを防ぐ
+  let out = text.replace(/```[\s\S]*?(```|$)|`[^`\n]+`/g, (m) => {
+    codes.push(m);
+    return CODE_PH(codes.length - 1);
+  });
+
+  // ① $$...$$ (ブロック数式) を先に抽出
+  out = out.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+    blocks.push({ type: 'block', math });
+    return PLACEHOLDER(blocks.length - 1);
+  });
+
+  // ② $...$ (インライン数式) を抽出
+  // 既に$$で置換済みなので誤マッチしない
+  out = out.replace(/\$([^$\n]+?)\$/g, (_, math) => {
+    blocks.push({ type: 'inline', math });
+    return PLACEHOLDER(blocks.length - 1);
+  });
+
+  // 退避したコードを元に戻してから marked.js に渡す
+  out = out.replace(/\x00C(\d+)\x00/g, (_, i) => codes[Number(i)]);
+
+  return { out, blocks };
+}
+
+// プレースホルダーをKaTeXでレンダリングして戻す
+function restoreMath(html, blocks) {
+  return html.replace(/\x00M(\d+)\x00/g, (_, i) => {
+    const { type, math } = blocks[Number(i)];
+    try {
+      return katex.renderToString(math, {
+        displayMode: type === 'block',
+        throwOnError: false,
+        output: 'html',
+      });
+    } catch (_) {
+      // レンダリング失敗時はコードとして表示
+      return `<code>${escapeHtml(math)}</code>`;
+    }
+  });
+}
+
+// ストリーミング中: Markdownのみ（LaTeXはそのまま表示）
+function renderStreaming(text) {
+  return marked.parse(text);
+}
+
+// 完了後: Markdown + LaTeX フルレンダリング
+function renderFinal(text) {
+  // KaTeXが読み込まれていない場合はMarkdownのみ
+  if (typeof katex === 'undefined') return marked.parse(text);
+  const { out, blocks } = extractMath(text);
+  const html = marked.parse(out);
+  return restoreMath(html, blocks);
+}
+
+// AIメッセージ: marked.js でフル Markdown レンダリング（ストリーミング中用）
+function renderAI(text) {
+  return renderStreaming(text);
+}
+
+// ユーザーメッセージ: シンプルにエスケープ＋改行のみ
+function renderUser(text) {
+  return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+// ─────────────────────────────────────────────
+//  DOM refs
+// ─────────────────────────────────────────────
+const chatContainer = document.getElementById('chat-container');
+const userInput     = document.getElementById('user-input');
+const sendBtn       = document.getElementById('send-btn');
+const stopBtn       = document.getElementById('stop-btn');
+const statusDot     = document.getElementById('status-dot');
+const statusText    = document.getElementById('status-text');
+const initCard      = document.getElementById('init-card');
+const attachBtn     = document.getElementById('attach-btn');
+const previewStrip  = document.getElementById('preview-strip');
+const modelSelect   = document.getElementById('model-select');
+const resetBtn      = document.getElementById('reset-btn');
+const settingsBtn   = document.getElementById('settings-btn');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsOverlay = document.getElementById('settings-overlay');
+const settingsClose = document.getElementById('settings-close');
+const ctxOptions    = document.getElementById('ctx-options');
+const thinkingToggle = document.getElementById('thinking-toggle');
+const orchestrationToggle = document.getElementById('orchestration-toggle');
+const draftCountOptions = document.getElementById('draft-count-options');
+const themeBtn      = document.getElementById('theme-btn');
+const statStatus    = document.getElementById('stat-status');
+const statusSub     = document.getElementById('status-sub');
+const statGen       = document.getElementById('stat-gen');
+const genValue      = document.getElementById('gen-value');
+const genSub        = document.getElementById('gen-sub');
+const genSpark      = document.getElementById('gen-spark');
+const promptValue   = document.getElementById('prompt-value');
+const promptSub     = document.getElementById('prompt-sub');
+const statVram      = document.getElementById('stat-vram');
+const vramValue     = document.getElementById('vram-value');
+const vramSub       = document.getElementById('vram-sub');
+const ctxValue      = document.getElementById('ctx-value');
+
+// 接続先ホストの表示
+document.getElementById('host-label').textContent =
+  window.location.protocol === 'file:' ? 'file:// → localhost:11434' : window.location.host;
+
+// ─────────────────────────────────────────────
+//  ステータスバーの表示/非表示（選択は localStorage に保存）
+// ─────────────────────────────────────────────
+const statusbarBtn = document.getElementById('statusbar-btn');
+const miniStat = document.getElementById('mini-stat');
+const miniDot  = document.getElementById('mini-dot');
+const miniTps  = document.getElementById('mini-tps');
+
+function syncStatusbarBtn() {
+  const hidden = document.documentElement.classList.contains('statusbar-hidden');
+  statusbarBtn.setAttribute('aria-pressed', String(!hidden));
+  statusbarBtn.title = hidden ? 'ステータスを表示' : 'ステータスを隠す';
+}
+syncStatusbarBtn();
+
+statusbarBtn.addEventListener('click', () => {
+  const hidden = document.documentElement.classList.toggle('statusbar-hidden');
+  try { localStorage.setItem('ollama_statusbar', hidden ? 'hidden' : 'shown'); } catch (_) {}
+  syncStatusbarBtn();
+});
+
+// ─────────────────────────────────────────────
+//  テーマ切替（既定はダーク。選択は localStorage に保存）
+// ─────────────────────────────────────────────
+themeBtn.addEventListener('click', () => {
+  const dark = document.documentElement.classList.toggle('dark');
+  try { localStorage.setItem('ollama_theme', dark ? 'dark' : 'light'); } catch (_) {}
+});
+
+
+// Conversation history for context
+let conversationHistory = [];
+// Pending text/code file attachments
+let pendingTextFiles = [];
+// Pending image attachments ({ name, dataUrl, base64 })
+let pendingImages = [];
+// AbortController for stopping generation
+let abortController = null;
+
+// ─────────────────────────────────────────────
+//  Settings: コンテキストウィンドウ
+// ─────────────────────────────────────────────
+const DEFAULT_CTX = 4096;
+let contextSize = parseInt(localStorage.getItem('ollama_ctx') || DEFAULT_CTX, 10);
+
+// 選択中のボタンをハイライト
+function updateCtxButtons() {
+  ctxOptions.querySelectorAll('.ctx-btn').forEach(btn => {
+    btn.classList.toggle('active', parseInt(btn.dataset.ctx, 10) === contextSize);
+  });
+}
+updateCtxButtons();
+
+function updateCtxCell() {
+  ctxValue.textContent = contextSize >= 1024 ? `${Math.round(contextSize / 1024)}K` : String(contextSize);
+}
+updateCtxCell();
+
+// コンテキストサイズ選択
+ctxOptions.addEventListener('click', (e) => {
+  const btn = e.target.closest('.ctx-btn');
+  if (!btn) return;
+  contextSize = parseInt(btn.dataset.ctx, 10);
+  localStorage.setItem('ollama_ctx', contextSize);
+  updateCtxButtons();
+  updateCtxCell();
+});
+
+// ─────────────────────────────────────────────
+//  Settings: 思考モード（Thinking）
+// ─────────────────────────────────────────────
+let thinkingMode = localStorage.getItem('ollama_thinking') === 'true';
+thinkingToggle.checked = thinkingMode;
+thinkingToggle.addEventListener('change', () => {
+  thinkingMode = thinkingToggle.checked;
+  localStorage.setItem('ollama_thinking', thinkingMode);
+});
+
+// ─────────────────────────────────────────────
+//  Settings: オーケストレーションモード
+// ─────────────────────────────────────────────
+let orchestrationMode = localStorage.getItem('ollama_orchestration') === 'true';
+orchestrationToggle.checked = orchestrationMode;
+orchestrationToggle.addEventListener('change', () => {
+  orchestrationMode = orchestrationToggle.checked;
+  localStorage.setItem('ollama_orchestration', orchestrationMode);
+});
+
+// ─────────────────────────────────────────────
+//  Settings: 下書きAIの数 n (1〜4)
+// ─────────────────────────────────────────────
+let draftCount = parseInt(localStorage.getItem('ollama_draft_count') || '2', 10);
+if (isNaN(draftCount) || draftCount < 1 || draftCount > 4) draftCount = 2;
+
+function updateDraftCountButtons() {
+  draftCountOptions.querySelectorAll('.ctx-btn').forEach(btn => {
+    btn.classList.toggle('active', parseInt(btn.dataset.n, 10) === draftCount);
+  });
+}
+updateDraftCountButtons();
+
+draftCountOptions.addEventListener('click', (e) => {
+  const btn = e.target.closest('.ctx-btn');
+  if (!btn) return;
+  draftCount = parseInt(btn.dataset.n, 10);
+  localStorage.setItem('ollama_draft_count', draftCount);
+  updateDraftCountButtons();
+});
+
+
+// 設定パネルの開閉
+function openSettings() {
+  settingsPanel.classList.add('open');
+  settingsOverlay.classList.add('open');
+}
+function closeSettings() {
+  settingsPanel.classList.remove('open');
+  settingsOverlay.classList.remove('open');
+}
+settingsBtn.addEventListener('click', () => {
+  settingsPanel.classList.contains('open') ? closeSettings() : openSettings();
+});
+settingsClose.addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', closeSettings);
+// Escキーで閉じる
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && settingsPanel.classList.contains('open')) closeSettings();
+});
+
+// ─────────────────────────────────────────────
+//  Status
+// ─────────────────────────────────────────────
+function setStatus(state, text) {
+  statusDot.className = 'status-dot ' + state;
+  miniDot.className = 'status-dot ' + state;
+  miniStat.title = `${text}（生成速度は直近の値）`;
+  statStatus.className = 'stat chamfer ' + state;
+  statusText.textContent = text;
+}
+
+// ─────────────────────────────────────────────
+//  生成速度の計測
+// ─────────────────────────────────────────────
+// ストリーミング中: チャンク数 ≒ トークン数として概算（Ollamaは基本1トークン1チャンク）
+// 完了時: 最終行(done:true)の eval_count / eval_duration から正確な値を出す
+function createLiveMeter() {
+  let first = null;
+  let count = 0;
+  return {
+    tick() {
+      const now = performance.now();
+      if (first === null) { first = now; return null; }
+      count++;
+      const sec = (now - first) / 1000;
+      return sec > 0.3 ? count / sec : null;
+    }
+  };
+}
+
+function statsFromDone(j) {
+  if (!j || !j.eval_count) return null;
+  const NS = 1e9;
+  return {
+    tps: j.eval_duration ? j.eval_count / (j.eval_duration / NS) : null,
+    tokens: j.eval_count,
+    promptTps: (j.prompt_eval_count && j.prompt_eval_duration) ? j.prompt_eval_count / (j.prompt_eval_duration / NS) : null,
+    promptTokens: j.prompt_eval_count || 0,
+    total: j.total_duration ? j.total_duration / NS : null,
+    load: j.load_duration ? j.load_duration / NS : null,
+  };
+}
+
+// メッセージ見出しに出す計測値
+function statsToMeta(st) {
+  if (!st) return [];
+  const items = [];
+  if (st.tps) items.push({ text: `${st.tps.toFixed(1)} tok/s`, strong: true });
+  items.push({ text: `${st.tokens} tok` });
+  if (st.total) items.push({ text: `${st.total.toFixed(1)}s` });
+  if (st.load && st.load > 1) items.push({ text: `ロード ${st.load.toFixed(1)}s` });
+  return items;
+}
+
+const tpsHistory = [];
+const SPARK_MAX = 16;
+
+function renderSpark() {
+  genSpark.innerHTML = '';
+  const max = Math.max(...tpsHistory, 1);
+  for (const v of tpsHistory) {
+    const bar = document.createElement('i');
+    bar.style.height = `${Math.max(2, Math.round((v / max) * 19))}px`;
+    bar.title = `${v.toFixed(1)} tok/s`;
+    genSpark.appendChild(bar);
+  }
+}
+
+function showLiveTps(v) {
+  if (v == null) return;
+  statGen.classList.add('live');
+  miniStat.classList.add('live');
+  genValue.textContent = v.toFixed(1);
+  miniTps.textContent = v.toFixed(1);
+  genSub.textContent = '生成中（概算）';
+}
+
+function showFinalStats(st) {
+  statGen.classList.remove('live');
+  miniStat.classList.remove('live');
+  if (!st) {
+    genSub.textContent = '計測できませんでした';
+    return;
+  }
+  if (st.tps) {
+    genValue.textContent = st.tps.toFixed(1);
+    miniTps.textContent = st.tps.toFixed(1);
+    tpsHistory.push(st.tps);
+    if (tpsHistory.length > SPARK_MAX) tpsHistory.shift();
+    renderSpark();
+  }
+  genSub.textContent = `直近 ${st.tokens} tok / ${st.total ? st.total.toFixed(1) + 's' : '--'}`;
+  if (st.promptTps) {
+    promptValue.textContent = st.promptTps >= 1000 ? Math.round(st.promptTps).toLocaleString() : st.promptTps.toFixed(1);
+    promptSub.textContent = `${st.promptTokens} tok 読み込み`;
+  } else if (st.promptTokens === 0) {
+    promptSub.textContent = 'キャッシュ済み';
+  }
+}
+
+function endLive() { statGen.classList.remove('live'); miniStat.classList.remove('live'); }
+
+// ─────────────────────────────────────────────
+//  VRAM（/api/ps: 今メモリに載っているモデル）
+// ─────────────────────────────────────────────
+async function refreshPs() {
+  try {
+    const res = await fetch(`${OLLAMA_BASE}/api/ps`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const models = data.models || [];
+    if (models.length === 0) {
+      statVram.classList.remove('offload');
+      vramValue.textContent = '0.0 GB';
+      vramSub.textContent = 'モデル未ロード';
+      return;
+    }
+    const m = models.find(x => x.name === modelSelect.value) || models[0];
+    const gb = (m.size_vram || 0) / 1024 ** 3;
+    const pct = m.size ? Math.round(((m.size_vram || 0) / m.size) * 100) : null;
+    vramValue.textContent = `${gb.toFixed(1)} GB`;
+    const others = models.length > 1 ? `  +${models.length - 1}` : '';
+    if (pct === null) {
+      vramSub.textContent = m.name + others;
+      statVram.classList.remove('offload');
+    } else if (pct >= 100) {
+      vramSub.textContent = `GPU 100%  ${m.name}${others}`;
+      statVram.classList.remove('offload');
+    } else {
+      vramSub.textContent = `GPU ${pct}% / CPU ${100 - pct}%  ${m.name}${others}`;
+      statVram.classList.add('offload');
+    }
+  } catch (_) {
+    vramValue.textContent = '--';
+    vramSub.textContent = '取得できません';
+  }
+}
+
+setInterval(() => { if (!document.hidden) refreshPs(); }, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPs(); });
+
+// ─────────────────────────────────────────────
+//  NDJSON ストリームの読み取り
+// ─────────────────────────────────────────────
+// チャンクの境目で1行が分割されても取りこぼさないよう、改行が来るまでバッファに溜める
+async function* readNdjson(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let json;
+      try { json = JSON.parse(line); } catch (_) { continue; }
+      if (json.error) throw new Error(json.error);
+      yield json;
+    }
+  }
+  buf += decoder.decode();
+  if (buf.trim()) {
+    let json = null;
+    try { json = JSON.parse(buf.trim()); } catch (_) {}
+    if (json) {
+      if (json.error) throw new Error(json.error);
+      yield json;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Error card
+// ─────────────────────────────────────────────
+function showErrorCard(reason) {
+  setStatus('error', '接続失敗');
+  initCard.classList.add('error');
+  vramSub.textContent = '取得できません';
+  initCard.innerHTML = `
+    <div class="card-tag">CONNECTION FAILED</div>
+    <h2>Ollama に接続できません</h2>
+    <p>${reason}</p>
+    <p style="margin-top:12px">以下を確認してください：</p>
+    <ul>
+      <li>Ollama がインストールされているか確認：<code>ollama --version</code></li>
+      <li>Ollama サーバーを起動：<code>ollama serve</code></li>
+      <li>モデルをダウンロード：<code>ollama pull qwen2.5-coder:3b</code></li>
+      <li>server.js 経由で開く：<code>node server.js</code></li>
+    </ul>
+    <button class="btn-primary" onclick="location.reload()">再接続する</button>
+  `;
+}
+
+// ─────────────────────────────────────────────
+//  Load models from Ollama
+// ─────────────────────────────────────────────
+async function loadModels() {
+  try {
+    const res = await fetch(`${OLLAMA_BASE}/api/tags`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const models = data.models || [];
+
+    modelSelect.innerHTML = '';
+    if (models.length === 0) {
+      modelSelect.innerHTML = '<option value="">モデルなし</option>';
+      showErrorCard('Ollama にモデルがインストールされていません。<br><code>ollama pull qwen2.5-coder:3b</code> などでモデルを追加してください。');
+      return false;
+    }
+
+    models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.name;
+      modelSelect.appendChild(opt);
+    });
+
+    return true;
+  } catch (err) {
+    modelSelect.innerHTML = '<option value="">接続失敗</option>';
+    showErrorCard(`Ollama サーバー (<code>${OLLAMA_BASE}</code>) に接続できません。<br><code>${escapeHtml(err.message)}</code>`);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Init
+// ─────────────────────────────────────────────
+async function init() {
+  setStatus('checking', '確認中');
+
+  const ok = await loadModels();
+  if (!ok) return;
+
+  setStatus('ready', 'オンライン');
+  refreshPs();
+  if (initCard) initCard.remove();
+  addWelcomeMessage();
+  enableInput();
+  resetBtn.style.display = 'block';
+}
+
+// ─────────────────────────────────────────────
+//  Welcome
+// ─────────────────────────────────────────────
+function addWelcomeMessage() {
+  const model = modelSelect.value;
+  addMessage('ai', `接続しました。モデル \`${model}\` で応答します。\n\n画像・テキスト・コードファイルは左のクリップか、ドラッグ＆ドロップで添付できます。`);
+}
+
+function enableInput() {
+  userInput.disabled = false;
+  sendBtn.disabled   = false;
+  userInput.focus();
+}
+
+// ─────────────────────────────────────────────
+//  Scroll helper（ユーザーが上スクロール中は強制ジャンプしない）
+// ─────────────────────────────────────────────
+function scrollToBottomIfNear() {
+  const threshold = 120; // px
+  const distFromBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight;
+  if (distFromBottom <= threshold) {
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+}
+
+function scrollToBottom() {
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+// ─────────────────────────────────────────────
+//  Message bubble
+// ─────────────────────────────────────────────
+// メッセージの見出し行（役割ラベル・計測値・コピー）
+function createMsgHead(roleLabel) {
+  const head = document.createElement('div');
+  head.className = 'msg-head';
+  const role = document.createElement('span');
+  role.className = 'role';
+  role.textContent = roleLabel;
+  role.title = roleLabel;
+  const meta = document.createElement('span');
+  meta.className = 'meta';
+  head.appendChild(role);
+  head.appendChild(meta);
+  return { head, meta };
+}
+
+// 枠内スクロールの自動追従
+// 更新前に最下部付近にいたときだけ最下部へ送る（上に戻して読んでいる間は動かさない）
+function updateStickyBottom(el, update) {
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+  update();
+  if (nearBottom) el.scrollTop = el.scrollHeight;
+}
+
+function setMetaItems(metaEl, items) {
+  metaEl.innerHTML = '';
+  for (const it of items) {
+    const span = document.createElement('span');
+    span.textContent = it.text;
+    if (it.strong) span.className = 'fast';
+    metaEl.appendChild(span);
+  }
+}
+
+// 完了したAIメッセージのコードブロックに「言語名 + コピー」の見出しを付ける
+function enhanceCodeBlocks(root) {
+  root.querySelectorAll('pre').forEach(pre => {
+    if (pre.parentElement && pre.parentElement.classList.contains('code-wrap')) return;
+    const code = pre.querySelector('code');
+    const m = code && code.className.match(/language-([\w+#.-]+)/);
+    const wrapEl = document.createElement('div');
+    wrapEl.className = 'code-wrap';
+    const bar = document.createElement('div');
+    bar.className = 'code-bar';
+    const lang = document.createElement('span');
+    lang.textContent = m ? m[1] : 'code';
+    const btn = document.createElement('button');
+    btn.textContent = 'コピー';
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText((code || pre).textContent).then(() => {
+        btn.textContent = 'コピー済み';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'コピー'; btn.classList.remove('copied'); }, 2000);
+      });
+    });
+    bar.appendChild(lang);
+    bar.appendChild(btn);
+    pre.parentNode.insertBefore(wrapEl, pre);
+    wrapEl.appendChild(bar);
+    wrapEl.appendChild(pre);
+  });
+}
+
+function addMessage(role, text, images) {
+  const wrap = document.createElement('div');
+  wrap.className = `message ${role}`;
+
+  const { head, meta } = createMsgHead(role === 'user' ? 'YOU' : (modelSelect.value || 'AI'));
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  // 思考ボックス（AIメッセージのみ、必要時に生成）
+  let thinkingBox = null;
+  let thinkingContent = null;
+
+  // 添付画像のサムネイル（指定時のみ、本文の上に表示）
+  if (images && images.length) {
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'msg-images';
+    for (const src of images) {
+      const im = document.createElement('img');
+      im.src = src;
+      im.loading = 'lazy';
+      im.addEventListener('click', () => window.open(src, '_blank'));
+      imgWrap.appendChild(im);
+    }
+    bubble.appendChild(imgWrap);
+  }
+
+
+  const contentDiv = document.createElement('div');
+  contentDiv.innerHTML = role === 'ai' ? renderAI(text) : renderUser(text);
+  bubble.appendChild(contentDiv);
+
+  // コピーボタン（クロージャで rawText を保持、二重ハンドラなし）
+  let rawText = text;
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'copy-btn';
+  copyBtn.textContent = 'コピー';
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(rawText).then(() => {
+      copyBtn.textContent = 'コピー済み';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.textContent = 'コピー';
+        copyBtn.classList.remove('copied');
+      }, 2000);
+    });
+  });
+  head.appendChild(copyBtn);
+
+  wrap.appendChild(head);
+  wrap.appendChild(bubble);
+  if (role === 'ai' && text) enhanceCodeBlocks(contentDiv);
+  chatContainer.appendChild(wrap);
+  scrollToBottom();
+
+  // 思考ボックスを必要時に生成する（AIメッセージのみ）
+  function ensureThinkingBox() {
+    if (thinkingBox) return;
+    thinkingBox = document.createElement('div');
+    thinkingBox.className = 'thinking-box';
+    const header = document.createElement('button');
+    header.className = 'thinking-header';
+    header.innerHTML = '<span class="arrow">▼</span><span>THINKING</span>';
+    thinkingContent = document.createElement('div');
+    thinkingContent.className = 'thinking-content';
+    header.addEventListener('click', () => {
+      thinkingBox.classList.toggle('collapsed');
+    });
+    thinkingBox.appendChild(header);
+    thinkingBox.appendChild(thinkingContent);
+    // バブルの先頭（本文の上）に挿入
+    bubble.insertBefore(thinkingBox, contentDiv);
+  }
+
+  // ストリーミング中に rawText を更新するための setter
+  // requestAnimationFrame で描画を間引き（60fps相当）してパフォーマンス改善
+  // isFinal=true のとき LaTeX も含めてフルレンダリング
+  let renderPending = false;
+  let finalized = false;   // 完了描画後に、予約済みのストリーミング描画で上書きしないための印
+  let thinkingPending = false;
+  let thinkingText = '';
+  return {
+    wrap,
+    contentDiv,
+    setMeta(items) { setMetaItems(meta, items); },
+    updateText(newText, isFinal = false) {
+      rawText = newText;
+      if (isFinal) {
+        // 完了時は即座にフルレンダリング。
+        // 直前に予約されたストリーミング描画が後から走ると数式やコード見出しが消えるので、finalized で止める
+        finalized = true;
+        contentDiv.innerHTML = renderFinal(rawText);
+        enhanceCodeBlocks(contentDiv);
+      } else {
+        finalized = false;
+        if (!renderPending) {
+          renderPending = true;
+          requestAnimationFrame(() => {
+            renderPending = false;
+            if (finalized) return;
+            contentDiv.innerHTML = renderStreaming(rawText);
+          });
+        }
+      }
+    },
+    // 思考過程の更新（thinkingテキストを思考ボックスに表示）
+    updateThinking(newThinking) {
+      ensureThinkingBox();
+      thinkingText = newThinking;
+      if (!thinkingPending) {
+        thinkingPending = true;
+        requestAnimationFrame(() => {
+          updateStickyBottom(thinkingContent, () => { thinkingContent.textContent = thinkingText; });
+          thinkingPending = false;
+        });
+      }
+    },
+    // 思考終了時: 自動で折りたたむ
+    collapseThinking() {
+      if (thinkingBox) {
+        thinkingContent.textContent = thinkingText;
+        thinkingBox.classList.add('collapsed');
+      }
+    }
+  };
+}
+
+// ─────────────────────────────────────────────
+//  Typing indicator
+// ─────────────────────────────────────────────
+function addTypingIndicator() {
+  const wrap = document.createElement('div');
+  wrap.className = 'message ai';
+  wrap.id = 'typing-wrap';
+
+  const { head } = createMsgHead(modelSelect.value || 'AI');
+
+  const ind = document.createElement('div');
+  ind.className = 'typing-indicator';
+  ind.textContent = '応答を待っています';
+
+  wrap.appendChild(head);
+  wrap.appendChild(ind);
+  chatContainer.appendChild(wrap);
+  scrollToBottom();
+}
+
+function removeTypingIndicator() {
+  const el = document.getElementById('typing-wrap');
+  if (el) el.remove();
+}
+
+// ─────────────────────────────────────────────
+//  File helpers
+// ─────────────────────────────────────────────
+function extToLang(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  const map = {
+    py:'python', js:'javascript', ts:'typescript', jsx:'jsx', tsx:'tsx',
+    html:'html', css:'css', json:'json', yaml:'yaml', yml:'yaml',
+    java:'java', c:'c', cpp:'cpp', h:'c', hpp:'cpp', cs:'csharp',
+    go:'go', rs:'rust', rb:'ruby', php:'php', sh:'bash', bat:'batch',
+    ps1:'powershell', sql:'sql', r:'r', swift:'swift', kt:'kotlin',
+    dart:'dart', vue:'vue', svelte:'svelte', md:'markdown', txt:'text',
+    xml:'xml', csv:'csv'
+  };
+  return map[ext] || ext;
+}
+
+function extToIcon(filename) {
+  const parts = filename.split('.');
+  const ext = parts.length > 1 ? parts.pop() : 'file';
+  return ext.slice(0, 6).toUpperCase();
+}
+
+// ─────────────────────────────────────────────
+//  Preview strip helpers
+// ─────────────────────────────────────────────
+function checkPreviewVisible() {
+  previewStrip.style.display = (pendingTextFiles.length > 0 || pendingImages.length > 0) ? 'flex' : 'none';
+}
+
+function addTextFileToPreview(name, content, lang) {
+  pendingTextFiles.push({ name, content, lang });
+
+  const item = document.createElement('div');
+  item.className = 'preview-item file-chip';
+
+  const icon = document.createElement('span');
+  icon.className = 'file-icon';
+  icon.textContent = extToIcon(name);
+
+  const label = document.createElement('span');
+  label.className = 'file-name';
+  label.textContent = name;
+  label.title = name;
+
+  const btn = document.createElement('button');
+  btn.className = 'remove-btn';
+  btn.textContent = '×';
+  btn.onclick = () => {
+    const idx = pendingTextFiles.findIndex(f => f.name === name && f.content === content);
+    if (idx !== -1) pendingTextFiles.splice(idx, 1);
+    item.remove();
+    checkPreviewVisible();
+  };
+
+  item.appendChild(icon);
+  item.appendChild(label);
+  item.appendChild(btn);
+  previewStrip.appendChild(item);
+  previewStrip.style.display = 'flex';
+}
+
+function addImageToPreview(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    // data URL から純粋な base64 部分を取り出す（Ollama の images は base64 文字列）
+    const base64 = String(dataUrl).split(',')[1] || '';
+    const entry = { name: file.name, dataUrl, base64 };
+    pendingImages.push(entry);
+
+    const item = document.createElement('div');
+    item.className = 'preview-item';
+
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = file.name;
+    img.title = file.name;
+
+    const btn = document.createElement('button');
+    btn.className = 'remove-btn';
+    btn.textContent = '×';
+    btn.onclick = () => {
+      const idx = pendingImages.indexOf(entry);
+      if (idx !== -1) pendingImages.splice(idx, 1);
+      item.remove();
+      checkPreviewVisible();
+    };
+
+    item.appendChild(img);
+    item.appendChild(btn);
+    previewStrip.appendChild(item);
+    previewStrip.style.display = 'flex';
+  };
+  reader.onerror = () => {
+    console.warn('Cannot read image file:', file.name, reader.error);
+  };
+  reader.readAsDataURL(file);
+}
+
+function isImageFile(file) {
+  if (file.type && file.type.startsWith('image/')) return true;
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name || '');
+}
+
+
+async function handleFiles(files) {
+  for (const file of files) {
+    if (isImageFile(file)) {
+      addImageToPreview(file);
+      continue;
+    }
+
+    try {
+      const content = await file.text();
+      const lang = extToLang(file.name);
+      addTextFileToPreview(file.name, content, lang);
+    } catch (e) {
+      console.warn('Cannot read file as text:', file.name, e);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Send message (streaming via Ollama API)
+// ─────────────────────────────────────────────
+async function sendMessage() {
+  const text = userInput.value.trim();
+  const textFiles = [...pendingTextFiles];
+  const images = [...pendingImages];
+
+  if (!text && textFiles.length === 0 && images.length === 0) return;
+
+  const model = modelSelect.value;
+  if (!model) {
+    alert('モデルを選択してください。');
+    return;
+  }
+
+  // Clear input
+  userInput.value = '';
+  userInput.style.height = 'auto';
+  userInput.disabled = true;
+  sendBtn.disabled = true;
+
+  // Clear preview
+  pendingTextFiles = [];
+  pendingImages = [];
+
+  previewStrip.innerHTML = '';
+  previewStrip.style.display = 'none';
+
+  // Build user message content
+  const imageDataUrls = images.map(i => i.dataUrl);
+  const imageBase64s = images.map(i => i.base64);
+  let userContent = text;
+  if (textFiles.length > 0) {
+    const fileNames = textFiles.map(f => `[${f.name}]`).join('  ');
+    const displayText = (text ? text + '\n' : '') + fileNames;
+    addMessage('user', displayText, imageDataUrls);
+
+    let combined = text ? text + '\n\n' : '';
+    for (const tf of textFiles) {
+      combined += `--- ファイル: ${tf.name} ---\n\`\`\`${tf.lang}\n${tf.content}\n\`\`\`\n\n`;
+    }
+    if (!text) combined += 'このコードについて説明してください。';
+    userContent = combined;
+  } else {
+    addMessage('user', text, imageDataUrls);
+    if (!text && images.length > 0) userContent = 'この画像について説明してください。';
+  }
+
+  // Add to history
+  const userMessage = { role: 'user', content: userContent };
+  if (imageBase64s.length > 0) userMessage.images = imageBase64s;
+  conversationHistory.push(userMessage);
+
+  // ── オーケストレーションモード分岐 ──
+  if (orchestrationMode) {
+    await runOrchestration(userContent, imageBase64s);
+    return;
+  }
+
+  addTypingIndicator();
+
+
+  // Show stop button
+  stopBtn.style.display = 'flex';
+  document.documentElement.classList.add('generating');
+  sendBtn.style.display = 'none';
+
+  abortController = new AbortController();
+  let fullText = '';
+  let fullThinking = '';
+  let msgHandle = null;
+
+  // 実際にリクエストを送る内部関数（thinkフラグを引数で受ける）
+  // フォールバックで再帰的に呼べるよう関数化
+  // includeThink=false のときは think フィールド自体を省略する（非対応モデル用フォールバック）
+  async function doFetch(thinkValue, includeThink = true) {
+    const body = {
+      model: model,
+      messages: conversationHistory,
+      stream: true,
+      options: { num_ctx: contextSize }
+    };
+    // think: true → 思考ON / think: false → 思考を明示的に抑制
+    if (includeThink) body.think = thinkValue;
+
+    return fetch(`${OLLAMA_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: abortController.signal
+    });
+  }
+
+  try {
+    // 思考モードON → think:true、OFF → think:false を明示送信
+    let res = await doFetch(thinkingMode);
+
+    // think パラメータ非対応モデルで400が返った場合 → thinkフィールド自体を省いて再リクエスト
+    if (!res.ok && res.status === 400) {
+      console.warn('think パラメータ非対応のモデルのようです。think無しで再試行します。');
+      res = await doFetch(false, false);
+    }
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errText}`);
+    }
+
+    removeTypingIndicator();
+    msgHandle = addMessage('ai', '');
+
+    let thinkingDone = false;
+    const meter = createLiveMeter();
+    let finalStats = null;
+
+    for await (const json of readNdjson(res)) {
+      if (json.message && (json.message.thinking || json.message.content)) {
+        showLiveTps(meter.tick());
+      }
+      if (json.message) {
+        // 思考過程（thinking）の処理
+        if (json.message.thinking) {
+          fullThinking += json.message.thinking;
+          msgHandle.updateThinking(fullThinking);
+          scrollToBottomIfNear();
+        }
+        // 本文（content）の処理
+        if (json.message.content) {
+          // 本文が始まったら思考ボックスを自動で折りたたむ（初回のみ）
+          if (!thinkingDone && fullThinking) {
+            msgHandle.collapseThinking();
+            thinkingDone = true;
+          }
+          fullText += json.message.content;
+          msgHandle.updateText(fullText);
+          scrollToBottomIfNear();
+        }
+      }
+      if (json.done) finalStats = statsFromDone(json);
+    }
+
+    // 正常完了時: 履歴に追加 + LaTeXフルレンダリング
+    if (fullText) {
+      conversationHistory.push({ role: 'assistant', content: fullText });
+      if (msgHandle) msgHandle.updateText(fullText, true);  // isFinal=true でLaTeXレンダリング
+    }
+    showFinalStats(finalStats);
+    if (msgHandle) msgHandle.setMeta(statsToMeta(finalStats));
+
+  } catch (err) {
+    removeTypingIndicator();
+    if (err.name === 'AbortError') {
+      // 中断時: 途中テキストを履歴に保存
+      if (fullText) {
+        conversationHistory.push({ role: 'assistant', content: fullText });
+        if (msgHandle) msgHandle.updateText(fullText + '\n\n*生成を停止しました*');
+      } else {
+        addMessage('ai', '生成を停止しました。');
+      }
+    } else {
+      console.error(err);
+      addMessage('ai', `エラーが発生しました：\n\`\`\`\n${err.message}\n\`\`\``);
+    }
+  } finally {
+    endLive();
+    refreshPs();
+    abortController = null;
+    stopBtn.style.display = 'none';
+    document.documentElement.classList.remove('generating');
+    sendBtn.style.display = 'flex';
+    userInput.disabled = false;
+    sendBtn.disabled = false;
+    userInput.focus();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Orchestration: 共通ストリーミングヘルパー
+// ─────────────────────────────────────────────
+// messages を送って思考・本文をストリーミングで受け取る。
+// onThinking(fullThinking) / onContent(fullContent) コールバックで都度更新。
+// 戻り値: { thinking, content }
+// think 非対応モデルでは 400 を受けて think フィールドを省いて再試行する。
+async function streamChat({ model, messages, think, onThinking, onContent }) {
+  const meter = createLiveMeter();
+  let stats = null;
+  async function doFetch(thinkValue, includeThink = true) {
+    const body = {
+      model,
+      messages,
+      stream: true,
+      options: { num_ctx: contextSize }
+    };
+    if (includeThink) body.think = thinkValue;
+
+    return fetch(`${OLLAMA_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: abortController.signal
+    });
+  }
+
+  let res = await doFetch(think);
+  if (!res.ok && res.status === 400) {
+    console.warn('think パラメータ非対応のモデルのようです。think無しで再試行します。');
+    res = await doFetch(false, false);
+  }
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`HTTP ${res.status}: ${errText}`);
+  }
+
+  let fullThinking = '';
+  let fullContent = '';
+
+  for await (const json of readNdjson(res)) {
+    if (json.message && (json.message.thinking || json.message.content)) {
+      showLiveTps(meter.tick());
+    }
+    if (json.message) {
+      if (json.message.thinking) {
+        fullThinking += json.message.thinking;
+        if (onThinking) onThinking(fullThinking);
+      }
+      if (json.message.content) {
+        fullContent += json.message.content;
+        if (onContent) onContent(fullContent);
+      }
+    }
+    if (json.done) stats = statsFromDone(json);
+  }
+
+  showFinalStats(stats);
+  return { thinking: fullThinking, content: fullContent, stats };
+}
+
+// ─────────────────────────────────────────────
+//  Orchestration: 下書きAIメッセージ要素
+// ─────────────────────────────────────────────
+// 下書きフェーズ用のメッセージ要素を作る。
+// - thinking: 折りたたみ可能な思考ボックス（thinking-box）
+// - 本文: グレー系の draft-content（「下書き中...」ラベル付き）
+// 戻り値: { wrap, updateThinking, updateContent, removeThinkingBox, removeDraftBody }
+function addDraftMessage(index, total) {
+  const wrap = document.createElement('div');
+  wrap.className = 'message ai draft';
+
+  const { head, meta } = createMsgHead(total > 1 ? `DRAFT ${index}/${total}` : 'DRAFT');
+  setMetaItems(meta, [{ text: '生成中' }]);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  let thinkingBox = null;
+  let thinkingContent = null;
+  let thinkingText = '';
+  let thinkingPending = false;
+
+  // 下書き本文（グレー）
+  const draftBox = document.createElement('div');
+  draftBox.className = 'draft-content';
+  const draftLabel = document.createElement('span');
+  draftLabel.className = 'draft-label';
+  draftLabel.textContent = '';
+  const draftBody = document.createElement('div');
+  draftBody.className = 'draft-body';
+  draftBox.appendChild(draftLabel);
+  draftBox.appendChild(draftBody);
+  bubble.appendChild(draftBox);
+
+  wrap.appendChild(head);
+  wrap.appendChild(bubble);
+  chatContainer.appendChild(wrap);
+  scrollToBottom();
+
+  function ensureThinkingBox() {
+    if (thinkingBox) return;
+    thinkingBox = document.createElement('div');
+    thinkingBox.className = 'thinking-box';
+    const header = document.createElement('button');
+    header.className = 'thinking-header';
+    const lbl = 'THINKING';
+    header.innerHTML = `<span class="arrow">▼</span><span>${lbl}</span>`;
+    thinkingContent = document.createElement('div');
+    thinkingContent.className = 'thinking-content';
+    header.addEventListener('click', () => thinkingBox.classList.toggle('collapsed'));
+    thinkingBox.appendChild(header);
+    thinkingBox.appendChild(thinkingContent);
+    bubble.insertBefore(thinkingBox, draftBox);
+  }
+
+  return {
+    wrap,
+    updateThinking(text) {
+      ensureThinkingBox();
+      thinkingText = text;
+      if (!thinkingPending) {
+        thinkingPending = true;
+        requestAnimationFrame(() => {
+          updateStickyBottom(thinkingContent, () => { thinkingContent.textContent = thinkingText; });
+          thinkingPending = false;
+        });
+      }
+    },
+    collapseThinking() {
+      if (thinkingBox) {
+        thinkingContent.textContent = thinkingText;
+        thinkingBox.classList.add('collapsed');
+      }
+    },
+    updateContent(text) {
+      updateStickyBottom(draftBody, () => { draftBody.textContent = text; });
+    },
+    setLabelDone(stats) {
+      setMetaItems(meta, stats ? statsToMeta(stats) : [{ text: '停止' }]);
+    },
+    // 後処理: 要素全体を DOM から削除
+    removeAll() {
+      wrap.remove();
+    }
+  };
+}
+
+// ─────────────────────────────────────────────
+//  Orchestration: 推敲AI用プロンプト組み立て
+// ─────────────────────────────────────────────
+function buildRefineSystemPrompt(n) {
+  if (n === 1) {
+    return `あなたは優秀な推敲者です。
+以下の「ユーザーの質問」と「AIの回答」を受け取り、回答を批判的に検証して改善した最終回答を出力してください。
+検証の観点：
+- 論理的な誤りや矛盾がないか
+- 事実として正確か（不確かな場合は明示する）
+- 構成・順序が適切か
+- 回答として過不足がないか
+
+出力形式：
+- ユーザーの質問に対する最終回答のみを出力してください。
+- 推敲プロセス・コメント・メタ情報は含めないでください。`;
+  }
+  return `あなたは優秀な統合者です。
+以下の「ユーザーの質問」とそれに対する「複数のAIの回答」を受け取り、各回答の優れた点を取り入れた最終回答を出力してください。
+統合の方針：
+- 各回答で一致している内容は信頼度が高い
+- 異なる視点・補足情報は積極的に取り込む
+- 矛盾する内容がある場合は、より正確と判断できる方を採用し、不確かさを明示する
+- 冗長な重複は整理して簡潔にまとめる
+
+出力形式：
+- ユーザーの質問に対する最終回答のみを出力してください。
+- 統合プロセス・コメント・メタ情報は含めないでください。`;
+}
+
+function buildRefineUserMessage(question, drafts) {
+  const n = drafts.length;
+  let msg = `【ユーザーの質問】\n${question}\n`;
+  if (n === 1) {
+    msg += `\n【AIの回答】\n${drafts[0]}`;
+  } else {
+    for (let i = 0; i < n; i++) {
+      msg += `\n【AIの回答 ${i + 1}】\n${drafts[i]}\n`;
+    }
+  }
+  return msg;
+}
+
+// ─────────────────────────────────────────────
+//  Orchestration: メインフロー
+// ─────────────────────────────────────────────
+// question: 直前のユーザー質問（conversationHistory の末尾に push 済み）
+async function runOrchestration(question, questionImages) {
+  const model = modelSelect.value;
+  const n = draftCount;
+
+  // 入力ロック & 中断ボタン表示
+  stopBtn.style.display = 'flex';
+  document.documentElement.classList.add('generating');
+  sendBtn.style.display = 'none';
+
+  abortController = new AbortController();
+
+  const draftHandles = [];   // 下書きメッセージ要素
+  const draftTexts = [];     // 完了した下書き本文
+  let refineHandle = null;   // 推敲AIメッセージ要素
+  let refineText = '';
+  let aborted = false;
+
+  try {
+    // ── 下書きフェーズ（直列 n 回）──
+    for (let i = 0; i < n; i++) {
+      const dh = addDraftMessage(i + 1, n);
+      draftHandles.push(dh);
+
+      let thinkingCollapsed = false;
+      const result = await streamChat({
+        model,
+        messages: conversationHistory,   // 会話履歴全体を渡す
+        think: thinkingMode,
+        onThinking: (t) => {
+          dh.updateThinking(t);
+          scrollToBottomIfNear();
+        },
+        onContent: (c) => {
+          if (!thinkingCollapsed) { dh.collapseThinking(); thinkingCollapsed = true; }
+          dh.updateContent(c);
+          scrollToBottomIfNear();
+        }
+      });
+
+      dh.collapseThinking();
+      dh.updateContent(result.content);
+      dh.setLabelDone(result.stats);
+      draftTexts.push(result.content);
+    }
+
+    // ── 推敲フェーズ（1 回）──
+    const systemPrompt = buildRefineSystemPrompt(n);
+    const refineUserMsg = buildRefineUserMessage(question, draftTexts);
+    const refineMessages = [
+      { role: 'system', content: systemPrompt },
+      (questionImages && questionImages.length
+        ? { role: 'user', content: refineUserMsg, images: questionImages }
+        : { role: 'user', content: refineUserMsg })
+    ];
+
+    refineHandle = addMessage('ai', '');
+    let refineThinkingCollapsed = false;
+
+    const refineResult = await streamChat({
+      model,
+      messages: refineMessages,   // 推敲AIには下書き＋質問のみ（履歴は渡さない）
+      think: thinkingMode,
+      onThinking: (t) => {
+        refineHandle.updateThinking(t);
+        scrollToBottomIfNear();
+      },
+      onContent: (c) => {
+        if (!refineThinkingCollapsed) { refineHandle.collapseThinking(); refineThinkingCollapsed = true; }
+        refineText = c;
+        refineHandle.updateText(c);
+        scrollToBottomIfNear();
+      }
+    });
+
+    refineText = refineResult.content;
+
+    // ── 後処理: 下書き本文・全思考ボックス（下書き分含む）を DOM から削除 ──
+    draftHandles.forEach(dh => dh.removeAll());
+
+    // 推敲AIの最終回答のみ履歴に積む（下書きは残さない）
+    if (refineText) {
+      refineHandle.collapseThinking();
+      refineHandle.updateText(refineText, true);  // LaTeXフルレンダリング
+      refineHandle.setMeta([...statsToMeta(refineResult.stats), { text: `下書き ${n}件を統合` }]);
+      conversationHistory.push({ role: 'assistant', content: refineText });
+    } else {
+      // 推敲が空だった場合は要素を削除
+      refineHandle.wrap?.remove();
+    }
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // B案: その時点のフェーズで停止。途中テキストがあれば表示したまま残す。
+      aborted = true;
+      if (refineHandle) {
+        // 推敲フェーズ中の中断: 下書きは削除し、推敲の途中テキストを残す
+        draftHandles.forEach(dh => dh.removeAll());
+        if (refineText) {
+          refineHandle.collapseThinking();
+          refineHandle.updateText(refineText + '\n\n*生成を停止しました*');
+        } else {
+          refineHandle.wrap?.remove();
+          addMessage('ai', '生成を停止しました。');
+        }
+      } else {
+        // 下書きフェーズ中の中断: 途中の下書きを表示したまま残す（履歴には積まない）
+        const last = draftHandles[draftHandles.length - 1];
+        if (last) last.setLabelDone();
+        addMessage('ai', '下書きの生成を停止しました。推敲は実行されません。');
+      }
+    } else {
+      console.error(err);
+      addMessage('ai', `エラーが発生しました：\n\`\`\`\n${err.message}\n\`\`\``);
+    }
+  } finally {
+    endLive();
+    refreshPs();
+    abortController = null;
+    stopBtn.style.display = 'none';
+    document.documentElement.classList.remove('generating');
+    sendBtn.style.display = 'flex';
+    userInput.disabled = false;
+    sendBtn.disabled = false;
+    userInput.focus();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Stop generation
+// ─────────────────────────────────────────────
+stopBtn.addEventListener('click', () => {
+  if (abortController) abortController.abort();
+});
+
+
+// ─────────────────────────────────────────────
+//  Event listeners
+// ─────────────────────────────────────────────
+
+// Attach button
+attachBtn.addEventListener('click', () => {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = '.txt,.md,.py,.js,.ts,.jsx,.tsx,.html,.css,.json,.yaml,.yml,.xml,.csv,.java,.c,.cpp,.h,.hpp,.cs,.go,.rs,.rb,.php,.sh,.bat,.ps1,.sql,.r,.swift,.kt,.dart,.vue,.svelte,.png,.jpg,.jpeg,.gif,.webp,.bmp,image/*';
+  input.onchange = () => { handleFiles(input.files); };
+  input.click();
+});
+
+// Drag & drop
+document.addEventListener('dragover', e => {
+  e.preventDefault();
+  document.body.classList.add('drag-over');
+});
+document.addEventListener('dragleave', e => {
+  if (!e.relatedTarget) document.body.classList.remove('drag-over');
+});
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  document.body.classList.remove('drag-over');
+  if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
+});
+
+// Textarea auto-resize
+userInput.addEventListener('input', () => {
+  userInput.style.height = 'auto';
+  userInput.style.height = Math.min(userInput.scrollHeight, 180) + 'px';
+});
+
+// Enter to send
+userInput.addEventListener('keydown', e => {
+  // e.isComposing === true のとき（日本語変換確定のEnter）は無視する
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+sendBtn.addEventListener('click', sendMessage);
+
+// Model change
+modelSelect.addEventListener('change', () => {
+  setStatus('ready', 'オンライン');
+  refreshPs();
+});
+
+// ─────────────────────────────────────────────
+//  Reset conversation
+// ─────────────────────────────────────────────
+resetBtn.addEventListener('click', () => {
+  conversationHistory = [];
+  chatContainer.innerHTML = '';
+  addMessage('ai', '会話をリセットしました。新しい話題からどうぞ。');
+  userInput.focus();
+});
+
+// ─────────────────────────────────────────────
+//  Boot
+// ─────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
